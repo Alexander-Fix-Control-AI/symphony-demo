@@ -13,7 +13,10 @@ namespace App\Pagination;
 
 use Doctrine\ORM\QueryBuilder as DoctrineQueryBuilder;
 use Doctrine\ORM\Tools\Pagination\CountWalker;
+use Doctrine\ORM\Tools\Pagination\OffsetPaginator;
+use Doctrine\ORM\Tools\Pagination\Page;
 use Doctrine\ORM\Tools\Pagination\Paginator as DoctrinePaginator;
+use Doctrine\ORM\Tools\Pagination\Window;
 
 /**
  * @author Javier Eguiluz <javier.eguiluz@gmail.com>
@@ -47,6 +50,9 @@ final class Paginator
         $this->currentPage = max(1, $page);
         $firstResult = ($this->currentPage - 1) * $this->pageSize;
 
+        // the first/max results are still applied to the query builder because the legacy
+        // Doctrine paginator reads the pagination window from the query itself; OffsetPaginator
+        // ignores them and overwrites both values on the queries it derives.
         $query = $this->queryBuilder
             ->setFirstResult($firstResult)
             ->setMaxResults($this->pageSize)
@@ -59,13 +65,42 @@ final class Paginator
             $query->setHint(CountWalker::HINT_DISTINCT, false);
         }
 
-        /** @var DoctrinePaginator<object> $paginator */
-        $paginator = new DoctrinePaginator($query, true);
-
         /** @var array<string, mixed> $havingDqlParts */
         $havingDqlParts = $this->queryBuilder->getDQLPart('having');
 
         $useOutputWalkers = \count($havingDqlParts ?: []) > 0;
+
+        // doctrine/orm 3.7 deprecates Doctrine\ORM\Tools\Pagination\Paginator in favor of the
+        // stateless OffsetPaginator, which returns an immutable page instead of mutating itself.
+        if (class_exists(OffsetPaginator::class)) {
+            $offsetPaginator = new OffsetPaginator(
+                fetchJoinCollection: true,
+                useOutputWalkers: $useOutputWalkers,
+            );
+
+            // Window::fromPageNumberAndSize() takes the 1-based page number, so it derives the
+            // same offset as $firstResult above without duplicating the arithmetic.
+            $window = Window::fromPageNumberAndSize($this->currentPage, $this->pageSize);
+
+            // paginate() returns a WindowPage, which implements Page; that interface extends
+            // Countable and IteratorAggregate, so the page itself already satisfies the
+            // \Traversable<array-key, object> type of self::$results. Unlike the iterator of
+            // the legacy paginator it is immutable and can be traversed more than once, which
+            // the RSS template relies on (it reads both "last" and the full loop).
+            /** @var Page<object> $resultPage */
+            $resultPage = $offsetPaginator->paginate($query, $window);
+
+            $this->results = $resultPage;
+            $this->numResults = $resultPage->getTotalCount();
+
+            return $this;
+        }
+
+        // Fallback for doctrine/orm < 3.7, which this project is still locked on (3.6.7) and
+        // where OffsetPaginator does not exist yet. Remove this branch (and the DoctrinePaginator
+        // import above) as soon as composer.lock requires doctrine/orm 3.7 or higher.
+        /** @var DoctrinePaginator<object> $paginator */
+        $paginator = new DoctrinePaginator($query, true);
         $paginator->setUseOutputWalkers($useOutputWalkers);
 
         $this->results = $paginator->getIterator();
