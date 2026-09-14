@@ -13,7 +13,8 @@ namespace App\Pagination;
 
 use Doctrine\ORM\QueryBuilder as DoctrineQueryBuilder;
 use Doctrine\ORM\Tools\Pagination\CountWalker;
-use Doctrine\ORM\Tools\Pagination\Paginator as DoctrinePaginator;
+use Doctrine\ORM\Tools\Pagination\OffsetPaginator;
+use Doctrine\ORM\Tools\Pagination\Window;
 
 /**
  * @author Javier Eguiluz <javier.eguiluz@gmail.com>
@@ -32,7 +33,7 @@ final class Paginator
     private int $numResults;
 
     /**
-     * @var \Traversable<array-key, object>
+     * @var \Traversable<int, object>
      */
     private \Traversable $results;
 
@@ -40,17 +41,16 @@ final class Paginator
         private readonly DoctrineQueryBuilder $queryBuilder,
         private readonly int $pageSize = self::PAGE_SIZE,
     ) {
+        if ($pageSize < 1) {
+            throw new \InvalidArgumentException(\sprintf('The page size must be 1 or more, "%d" given.', $pageSize));
+        }
     }
 
     public function paginate(int $page = 1): self
     {
         $this->currentPage = max(1, $page);
-        $firstResult = ($this->currentPage - 1) * $this->pageSize;
 
-        $query = $this->queryBuilder
-            ->setFirstResult($firstResult)
-            ->setMaxResults($this->pageSize)
-            ->getQuery();
+        $query = $this->queryBuilder->getQuery();
 
         /** @var array<string, mixed> $joinDqlParts */
         $joinDqlParts = $this->queryBuilder->getDQLPart('join');
@@ -59,17 +59,21 @@ final class Paginator
             $query->setHint(CountWalker::HINT_DISTINCT, false);
         }
 
-        /** @var DoctrinePaginator<object> $paginator */
-        $paginator = new DoctrinePaginator($query, true);
-
         /** @var array<string, mixed> $havingDqlParts */
         $havingDqlParts = $this->queryBuilder->getDQLPart('having');
 
         $useOutputWalkers = \count($havingDqlParts ?: []) > 0;
-        $paginator->setUseOutputWalkers($useOutputWalkers);
 
-        $this->results = $paginator->getIterator();
-        $this->numResults = $paginator->count();
+        /** @var OffsetPaginator<object> $paginator */
+        $paginator = new OffsetPaginator(fetchJoinCollection: true, useOutputWalkers: $useOutputWalkers);
+
+        // the window carries the offset and the page size explicitly, so the query
+        // itself is left untouched and the paginator can be reused for any page
+        $window = Window::fromPageNumberAndSize($this->currentPage, $this->pageSize);
+        $windowPage = $paginator->paginate($query, $window);
+
+        $this->results = $windowPage->getIterator();
+        $this->numResults = $windowPage->getTotalCount();
 
         return $this;
     }
